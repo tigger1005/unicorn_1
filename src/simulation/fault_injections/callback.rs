@@ -77,3 +77,16 @@ pub(super) fn hook_code_callback<D>(emu: &mut Unicorn<EmulationData>, address: u
         .and_modify(|record| record.count += 1)
         .or_insert(record);
 }
+
+/// Code Hook for tracing functionality
+///
+pub(super) fn hook_nop_code_callback<D>(emu: &mut Unicorn<EmulationData>, address: u64, size: u32) {
+    // search for corresponding fault
+    let _fault = emu
+        .get_data()
+        .fault_data
+        .iter()
+        .filter(|f| f.fault.address == address);
+    //println!("{fault:?}");
+    emu.set_pc((address + size as u64) | 1).unwrap();
+}

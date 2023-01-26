@@ -7,7 +7,7 @@ CFLAGS = -c -Os -fPIC -Iinclude \
          -g -gdwarf -Wno-unused-but-set-variable -fno-inline -fno-omit-frame-pointer \
          -fno-ipa-cp-clone -fno-ipa-cp -fno-common -fno-builtin -ffreestanding -fno-stack-protector -Wall -Wno-format-security \
          -Wno-format-nonliteral -Wno-return-local-addr -Wno-int-to-pointer-cast -march=$(TARGET) \
-		 -DMCUBOOT_FIH_PROFILE_ON -DMCUBOOT_FIH_PROFILE_HIGH -DFAULT_INJECTION_TEST
+		 -DMCUBOOT_FIH_PROFILE_ON -DMCUBOOT_FIH_PROFILE_LOW -DFAULT_INJECTION_TEST
 
 CFLAGS_LD = -N -Wl,--build-id=none -fPIC -fPIE -g -gdwarf -Os -Wno-unused-but-set-variable -Wno-return-local-addr -fno-inline -fno-ipa-cp-clone \
             -fno-ipa-cp -nostartfiles -nodefaultlibs -march=$(TARGET)

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::ops::Shl;
 
-use super::{ElfFile, SimulationFaultRecord, TraceRecord};
+use super::{ElfFile, SimulationData};
 
 mod callback;
 use callback::*;
@@ -54,44 +54,76 @@ struct Cpu {
     pc: u64,
 }
 
-#[derive(Clone, Copy)]
+/// Data structure for tracing
+#[derive(Copy, Clone)]
+pub struct TraceRecord {
+    pub size: usize,
+    pub count: usize,
+}
+
+/// Enumeration of possible faults
+///
+#[derive(Clone, Copy, Debug)]
 pub enum FaultType {
     Uninitialized,
     NopCached(usize),
     BitFlipCached(usize),
 }
 
-#[derive(Clone)]
+/// Data structure for fault injections
+///
+#[derive(Clone, Debug)]
 pub struct FaultData {
     pub data: Vec<u8>,
     pub data_changed: Vec<u8>,
-    pub address: u64,
-    pub count: usize,
+    pub fault: SimulationData,
 }
 
 impl FaultData {
-    pub fn new(address_record: SimulationFaultRecord) -> Self {
+    pub fn new() -> Self {
         Self {
             data: Vec::new(),
             data_changed: Vec::new(),
-            address: address_record.address,
-            count: 0,
+            fault: SimulationData {
+                address: 0,
+                size: 0,
+                count: 0,
+                fault_type: FaultType::Uninitialized,
+            },
         }
     }
 }
 
-pub struct FaultInjections<'a> {
-    file_data: ElfFile,
-    emu: Unicorn<'a, EmulationData>,
-    cpu: Cpu,
-    fault_data: Vec<FaultData>,
-}
-
+/// Emulation data, which can be accessed by callback functions
+///
 struct EmulationData {
     state: RunState,
     is_positiv: bool,
     print_output: bool,
     trace_data: HashMap<u64, TraceRecord>,
+    fault_data: Vec<FaultData>,
+}
+
+/// Class data for fault_injections class
+///
+pub struct FaultInjections<'a> {
+    file_data: ElfFile,
+    emu: Unicorn<'a, EmulationData>,
+    cpu: Cpu,
+    system_hooks: Vec<*mut c_void>,
+    usage_hooks: Vec<*mut c_void>,
+}
+
+impl<'a> Drop for FaultInjections<'a> {
+    fn drop(&mut self) {
+        self.system_hooks
+            .iter()
+            .for_each(|hook| self.emu.remove_hook(*hook).unwrap());
+
+        self.usage_hooks
+            .iter()
+            .for_each(|hook| self.emu.remove_hook(*hook).unwrap());
+    }
 }
 
 impl<'a> FaultInjections<'a> {
@@ -102,6 +134,7 @@ impl<'a> FaultInjections<'a> {
             is_positiv: true,
             print_output: true,
             trace_data: HashMap::new(),
+            fault_data: Vec::new(),
         };
 
         // Setup platform -> ARMv8-m.base
@@ -114,7 +147,8 @@ impl<'a> FaultInjections<'a> {
             file_data: temp_file_data,
             emu,
             cpu: Cpu { pc: 0 },
-            fault_data: Vec::new(),
+            system_hooks: Vec::new(),
+            usage_hooks: Vec::new(),
         }
     }
 
@@ -131,6 +165,8 @@ impl<'a> FaultInjections<'a> {
         self.emu
             .reg_write(RegisterARM::SP, STACK_BASE + STACK_SIZE as u64 - 4)
             .expect("failed to set register");
+        // ToDo
+        self.cpu.pc = self.file_data.program_header.p_paddr;
     }
 
     /// Load source code from elf file into simulation
@@ -162,22 +198,26 @@ impl<'a> FaultInjections<'a> {
     /// BreakPoints
     /// { binInfo.Symbols["flash_load_img"].Address }
     pub fn setup_breakpoints(&mut self) {
-        self.emu
-            .add_code_hook(
-                self.file_data.flash_load_img.st_value,
-                self.file_data.flash_load_img.st_value + 1,
-                hook_code_flash_load_img_callback::<EmulationData>,
-            )
-            .expect("failed to set flash_load_img code hook");
+        self.system_hooks.push(
+            self.emu
+                .add_code_hook(
+                    self.file_data.flash_load_img.st_value,
+                    self.file_data.flash_load_img.st_value + 1,
+                    hook_code_flash_load_img_callback::<EmulationData>,
+                )
+                .expect("failed to set flash_load_img code hook"),
+        );
 
-        self.emu
-            .add_mem_hook(
-                HookType::MEM_WRITE,
-                AUTH_BASE,
-                AUTH_BASE + 4,
-                mmio_auth_write_callback::<EmulationData>,
-            )
-            .expect("failed to set memory hook");
+        self.system_hooks.push(
+            self.emu
+                .add_mem_hook(
+                    HookType::MEM_WRITE,
+                    AUTH_BASE,
+                    AUTH_BASE + 4,
+                    mmio_auth_write_callback::<EmulationData>,
+                )
+                .expect("failed to et memory hook"),
+        );
     }
 
     /// Setup memory mapping, stack, io mapping
@@ -257,17 +297,21 @@ impl<'a> FaultInjections<'a> {
         ret_val
     }
 
-    /// Set fault at specified address with given parameters
+    /// Set fault record to internal structure for use in callback function
     ///
     /// Original and replaced data is stored for restauration
     /// and printing
-    pub fn set_fault(&mut self, address_record: SimulationFaultRecord) {
-        let mut fault_data: FaultData = FaultData::new(address_record);
+    fn set_fault_data(&mut self, record: SimulationData) {
+        let mut fault_data = FaultData {
+            data: Vec::new(),
+            data_changed: Vec::new(),
+            fault: record,
+        };
 
         // Generate data with fault specific handling
-        match address_record.fault_type {
+        match fault_data.fault.fault_type {
             FaultType::NopCached(number) => {
-                let mut address = address_record.address;
+                let mut address = fault_data.fault.address;
                 for _count in 0..number {
                     let temp_size = self.get_asm_cmd_size(address).unwrap();
                     for i in 0..temp_size {
@@ -279,15 +323,15 @@ impl<'a> FaultInjections<'a> {
                 fault_data.data = fault_data.data_changed.clone();
                 // Read original data
                 self.emu
-                    .mem_read(address_record.address, &mut fault_data.data)
+                    .mem_read(fault_data.fault.address, &mut fault_data.data)
                     .unwrap();
             }
             FaultType::BitFlipCached(pos) => {
-                let temp_size = self.get_asm_cmd_size(address_record.address).unwrap();
+                let temp_size = self.get_asm_cmd_size(fault_data.fault.address).unwrap();
                 fault_data.data = vec![0; temp_size];
                 // Read original data
                 self.emu
-                    .mem_read(address_record.address, &mut fault_data.data)
+                    .mem_read(fault_data.fault.address, &mut fault_data.data)
                     .unwrap();
                 fault_data.data_changed = fault_data.data.clone();
                 fault_data.data_changed[pos / 8] ^= (0x01_u8).shl(pos % 8);
@@ -297,13 +341,8 @@ impl<'a> FaultInjections<'a> {
             }
         }
 
-        // Write generated data to address
-        self.emu
-            .mem_write(address_record.address, &fault_data.data_changed)
-            .unwrap();
-
         // Push to fault data vector
-        self.fault_data.push(fault_data);
+        self.emu.get_data_mut().fault_data.push(fault_data);
     }
 
     fn get_asm_cmd_size(&self, address: u64) -> Option<usize> {
@@ -335,24 +374,50 @@ impl<'a> FaultInjections<'a> {
     }
 
     /// Get fault_data
-    pub fn get_fault_data(&self) -> &Vec<FaultData> {
-        &self.fault_data
+    pub fn get_fault_data(&self) -> Vec<FaultData> {
+        self.emu.get_data().fault_data.clone()
     }
 
     /// Set code hook for tracing
     ///
-    pub fn set_code_hook(&mut self) -> Result<*mut c_void, uc_error> {
-        let res = self.emu.add_code_hook(
-            self.file_data.program_header.p_paddr,
-            self.file_data.program_header.p_memsz,
-            hook_code_callback::<EmulationData>,
+    pub fn set_trace_hook(&mut self, sim_faults: Vec<SimulationData>) {
+        self.usage_hooks.push(
+            self.emu
+                .add_code_hook(
+                    self.file_data.program_header.p_paddr,
+                    self.file_data.program_header.p_memsz,
+                    hook_code_callback::<EmulationData>,
+                )
+                .expect("failed to setup trace hook"),
         );
-        res
+        sim_faults
+            .iter()
+            .for_each(|sim_fault| self.set_fault_data(sim_fault.clone()));
     }
 
-    /// Release hook function
-    pub fn release_hook(&mut self, hook: *mut c_void) {
-        self.emu.remove_hook(hook).unwrap();
+    /// Set hook and data to internal emu structure for accessibility
+    /// during callback
+    ///
+    pub fn set_usage_fault_hook(&mut self, sim_fault: SimulationData) {
+        self.usage_hooks.push(
+            self.emu
+                .add_code_hook(
+                    sim_fault.address,
+                    sim_fault.address + 1, //sim_fault.size as u64,
+                    hook_nop_code_callback::<EmulationData>,
+                )
+                .expect("failed to setup fault hook"),
+        );
+        self.set_fault_data(sim_fault);
+    }
+
+    /// Release hook function and all stored data in internal structure
+    ///
+    pub fn release_usage_fault_hooks(&mut self) {
+        self.usage_hooks
+            .iter()
+            .for_each(|hook| self.emu.remove_hook(*hook).unwrap());
+        self.emu.get_data_mut().fault_data.clear();
     }
 
     /// Copy trace data to caller
