@@ -10,7 +10,7 @@ use callback::*;
 pub use unicorn_engine::unicorn_const::uc_error;
 use unicorn_engine::unicorn_const::{Arch, HookType, MemType, Mode, Permission, SECOND_SCALE};
 
-use unicorn_engine::{RegisterARM, Unicorn};
+use unicorn_engine::{Context, RegisterARM, UcHookId, Unicorn};
 
 use log::debug;
 
@@ -23,7 +23,7 @@ const AUTH_BASE: u64 = 0xAA01000;
 const T1_RET: [u8; 2] = [0x70, 0x47]; // bx lr
 const T1_NOP: [u8; 4] = [0x00, 0xBF, 0x00, 0xBF];
 
-const ARM_REG: [RegisterARM; 16] = [
+const ARM_REG: [RegisterARM; 17] = [
     RegisterARM::R0,
     RegisterARM::R1,
     RegisterARM::R2,
@@ -40,6 +40,7 @@ const ARM_REG: [RegisterARM; 16] = [
     RegisterARM::SP,
     RegisterARM::LR,
     RegisterARM::PC,
+    RegisterARM::CPSR,
 ];
 
 #[derive(PartialEq, Debug, Clone, Copy)]
@@ -110,8 +111,9 @@ pub struct FaultInjections<'a> {
     file_data: ElfFile,
     emu: Unicorn<'a, EmulationData>,
     cpu: Cpu,
-    system_hooks: Vec<*mut c_void>,
-    usage_hooks: Vec<*mut c_void>,
+    system_hooks: Vec<UcHookId>,
+    usage_hooks: Vec<UcHookId>,
+    context: Option<Context>,
 }
 
 impl<'a> Drop for FaultInjections<'a> {
@@ -119,10 +121,12 @@ impl<'a> Drop for FaultInjections<'a> {
         self.system_hooks
             .iter()
             .for_each(|hook| self.emu.remove_hook(*hook).unwrap());
+        self.system_hooks.clear();
 
         self.usage_hooks
             .iter()
             .for_each(|hook| self.emu.remove_hook(*hook).unwrap());
+        self.usage_hooks.clear();
     }
 }
 
@@ -149,6 +153,7 @@ impl<'a> FaultInjections<'a> {
             cpu: Cpu { pc: 0 },
             system_hooks: Vec::new(),
             usage_hooks: Vec::new(),
+            context: None,
         }
     }
 
@@ -302,39 +307,43 @@ impl<'a> FaultInjections<'a> {
     /// Original and replaced data is stored for restauration
     /// and printing
     fn set_fault_data(&mut self, record: SimulationData) {
-        let mut fault_data = FaultData {
+        let mut fault_data_entry = FaultData {
             data: Vec::new(),
             data_changed: Vec::new(),
             fault: record,
         };
 
         // Generate data with fault specific handling
-        match fault_data.fault.fault_type {
+        match fault_data_entry.fault.fault_type {
             FaultType::NopCached(number) => {
-                let mut address = fault_data.fault.address;
+                fault_data_entry.fault.size = 0;
+                let mut address = fault_data_entry.fault.address;
                 for _count in 0..number {
                     let temp_size = self.get_asm_cmd_size(address).unwrap();
                     for i in 0..temp_size {
-                        fault_data.data_changed.push(*T1_NOP.get(i).unwrap())
+                        fault_data_entry.data_changed.push(*T1_NOP.get(i).unwrap())
                     }
                     address += temp_size as u64;
+                    fault_data_entry.fault.size += temp_size;
                 }
                 // Set to same size as data_changed
-                fault_data.data = fault_data.data_changed.clone();
+                fault_data_entry.data = fault_data_entry.data_changed.clone();
                 // Read original data
                 self.emu
-                    .mem_read(fault_data.fault.address, &mut fault_data.data)
+                    .mem_read(fault_data_entry.fault.address, &mut fault_data_entry.data)
                     .unwrap();
             }
             FaultType::BitFlipCached(pos) => {
-                let temp_size = self.get_asm_cmd_size(fault_data.fault.address).unwrap();
-                fault_data.data = vec![0; temp_size];
+                let temp_size = self
+                    .get_asm_cmd_size(fault_data_entry.fault.address)
+                    .unwrap();
+                fault_data_entry.data = vec![0; temp_size];
                 // Read original data
                 self.emu
-                    .mem_read(fault_data.fault.address, &mut fault_data.data)
+                    .mem_read(fault_data_entry.fault.address, &mut fault_data_entry.data)
                     .unwrap();
-                fault_data.data_changed = fault_data.data.clone();
-                fault_data.data_changed[pos / 8] ^= (0x01_u8).shl(pos % 8);
+                fault_data_entry.data_changed = fault_data_entry.data.clone();
+                fault_data_entry.data_changed[pos / 8] ^= (0x01_u8).shl(pos % 8);
             }
             _ => {
                 panic!("No fault type set")
@@ -342,7 +351,7 @@ impl<'a> FaultInjections<'a> {
         }
 
         // Push to fault data vector
-        self.emu.get_data_mut().fault_data.push(fault_data);
+        self.emu.get_data_mut().fault_data.push(fault_data_entry);
     }
 
     fn get_asm_cmd_size(&self, address: u64) -> Option<usize> {
@@ -417,11 +426,23 @@ impl<'a> FaultInjections<'a> {
         self.usage_hooks
             .iter()
             .for_each(|hook| self.emu.remove_hook(*hook).unwrap());
+        self.usage_hooks.clear();
+
         self.emu.get_data_mut().fault_data.clear();
     }
 
     /// Copy trace data to caller
     pub fn get_trace(&self) -> HashMap<u64, TraceRecord> {
         self.emu.get_data().trace_data.clone()
+    }
+
+    pub fn context_init(&mut self) {
+        self.context = Some(self.emu.context_init().unwrap());
+    }
+    pub fn context_restore(&mut self) {
+        self.init_states(false);
+        if let Some(context) = self.context.as_ref() {
+            self.emu.context_restore(context).unwrap();
+        }
     }
 }

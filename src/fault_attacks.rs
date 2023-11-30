@@ -17,13 +17,13 @@ pub fn cached_nop_simulation_x_y(
     records: &Vec<SimulationData>,
     num_x: usize,
     num_y: usize,
-) -> (Vec<Vec<FaultData>>, usize) {
+) -> (Option<Vec<Vec<FaultData>>>, usize) {
     // Print overview
-    //    let n = AtomicUsize::new(0);
+    let n = AtomicUsize::new(0);
     println!(
         "Fault injection - Insert 2 cached-NOP areas - with A: {num_x} and B: {num_y} consecutive nops"
     );
-    //    let bar = ProgressBar::new(records.len() as u64);
+    // let bar = ProgressBar::new(records.len() as u64);
     // Setup sender and receiver
     //let (sender, receiver) = channel(); // Loop over all addresses from first round
     let mut recs = records.clone();
@@ -36,6 +36,7 @@ pub fn cached_nop_simulation_x_y(
         .for_each(|rec| vec_of_vec_attacks.push(vec![rec.clone()]));
     let mut simulation = Simulation::new(file_data);
     let flat = simulation.run_with_faults(vec_of_vec_attacks);
+    n.fetch_add(records.len(), Ordering::Relaxed);
     drop(simulation);
 
     //     .for_each_with(sender, |s, record| {
@@ -68,7 +69,7 @@ pub fn cached_nop_simulation_x_y(
     // combine all vec<vec<FaultData>>
     //let flat = data.into_iter().flatten().collect_vec();
     // (data, n.load(Ordering::Relaxed))
-    (flat.unwrap(), 0)
+    (flat, n.load(Ordering::Relaxed))
 }
 
 /// Run program with single bit flip on every instruction injected as an fault attack

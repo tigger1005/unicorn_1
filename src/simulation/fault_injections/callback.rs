@@ -1,4 +1,6 @@
-use super::{debug, EmulationData, MemType, RunState, TraceRecord, Unicorn, BOOT_STAGE};
+use super::{
+    debug, EmulationData, MemType, RegisterARM, RunState, TraceRecord, Unicorn, BOOT_STAGE,
+};
 
 /// Callback for auth mem IO write access
 ///
@@ -80,13 +82,25 @@ pub(super) fn hook_code_callback<D>(emu: &mut Unicorn<EmulationData>, address: u
 
 /// Code Hook for tracing functionality
 ///
-pub(super) fn hook_nop_code_callback<D>(emu: &mut Unicorn<EmulationData>, address: u64, size: u32) {
+pub(super) fn hook_nop_code_callback<D>(
+    emu: &mut Unicorn<EmulationData>,
+    address: u64,
+    _size: u32,
+) {
     // search for corresponding fault
-    let _fault = emu
+    let fault = emu
         .get_data()
         .fault_data
         .iter()
-        .filter(|f| f.fault.address == address);
+        .filter(|f| f.fault.address == address)
+        .next()
+        .unwrap();
     //println!("{fault:?}");
-    emu.set_pc((address + size as u64) | 1).unwrap();
+
+    // Skip one instruction
+    // Save and restore CPSR register as Unicorn changes its value
+    let cpsr = emu.reg_read(RegisterARM::CPSR).unwrap();
+    emu.reg_write(RegisterARM::PC, (address + fault.fault.size as u64) | 1)
+        .unwrap();
+    emu.reg_write(RegisterARM::CPSR, cpsr).unwrap();
 }

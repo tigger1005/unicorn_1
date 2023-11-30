@@ -119,9 +119,14 @@ impl<'a> Simulation<'a> {
         self.emu.deactivate_printf_function();
         //
         let mut fault_data_vec = Vec::new();
+
+        self.emu.init_states(false);
+        self.emu.init_register();
+        self.emu.context_init();
+
         vec_of_vec_attacks.iter().for_each(|vec_attacks| {
-            self.emu.init_states(false);
-            self.emu.init_register();
+            self.emu.context_restore();
+            // Write code to memory area
             vec_attacks
                 .iter()
                 .for_each(|attack| self.emu.set_usage_fault_hook(attack.clone()));

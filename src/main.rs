@@ -52,16 +52,19 @@ fn main() {
     let mut simulation = Simulation::new(&file_data);
     let external_records = simulation.record_code_trace(vec![]);
 
-    //let mut success = false;
+    // let mut success = false;
     let mut count_sum = 0;
     // Run cached nop simulation
-    for i in 1..=1 {
+    for i in 1..=10 {
         let (nop_1, count) =
             fault_attacks::cached_nop_simulation_x_y(&file_data, &external_records, i, 0);
         count_sum += count;
-        if cs.print_fault_records(nop_1) != 0 {
-            //           success = true;
-            break;
+        if nop_1.is_some() {
+            cs.print_fault_records(nop_1.unwrap());
+            {
+                //               success = true;
+                break;
+            }
         }
     }
 
@@ -72,7 +75,9 @@ fn main() {
     //         let (nop, count) =
     //             fault_attacks::cached_nop_simulation_x_y(&file_data, &external_records, t[0], t[1]);
     //         count_sum += count;
-    //         if cs.print_fault_records(nop) != 0 {
+
+    //         if nop.is_some() {
+    //             cs.print_fault_records(nop.unwrap());
     //             break;
     //         }
     //     }
